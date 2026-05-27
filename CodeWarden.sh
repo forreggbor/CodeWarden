@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="v1.05.01"
+VERSION="v1.05.03"
 
 # Record start time for performance tracking
 START_TIME=$(date +%s)
