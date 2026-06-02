@@ -4,10 +4,10 @@ A bash utility for PHP project maintenance — localization analysis, file owner
 
 ## Features
 
-- **PO Intelligence**: detect unused, missing, duplicate, and out-of-sync translation keys across `hu_HU` / `en_US`
+- **Translation Intelligence**: detect unused, missing, duplicate, and out-of-sync translation keys across `hu_HU` / `en_US`; supports both **PHP-array** (`messages.php`) and **Gettext** (`.po`) formats with automatic detection — no CLI switch needed
 - **Dynamic prefix tracking**: keys assembled via string concatenation are protected from false-positive "unused" reports
 - **PO compilation**: validate and compile `.po` → `.mo`, then restart PHP-FPM
-- **Cleanup**: comment out strictly unused translation keys (with dry-run support)
+- **Cleanup**: comment out strictly unused Gettext keys (with dry-run support)
 - **Ownership & permissions**: set `user:group` and apply standard permission masks recursively
 - **Hostname**: set local mDNS hostname via `hostnamectl` + `avahi-daemon`
 

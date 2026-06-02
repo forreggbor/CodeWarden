@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.06.00] - 2026-06-02
+
+| Category | Description                                                              |
+|----------|--------------------------------------------------------------------------|
+| Added    | PHP-array translation support with automatic system detection            |
+| Changed  | Single-language sync, cleanup safety for PHP, labels                     |
+
+### Added
+- Translation key checks now work with PHP-array files (`locale/{LANG}/messages.php`, `webroot/locale/{LANG}/messages.php`) in addition to Gettext `.po` files — all six sub-checks (sync, missing, unused, duplicates, dynamic, doconly) function identically for both formats
+- Automatic translation system detection: CodeWarden probes PHP-array paths first, then Gettext paths, with no CLI switch required; the detected mode and resolved file paths are printed at the start of the analysis
+- Single-language projects are now handled gracefully — when only one language file exists (e.g., only `hu_HU`), the sync check reports "skipped" instead of flagging all keys as missing in the other language
+
+### Changed
+- `-p` flag now accepts PHP file path templates (e.g., `locale/{LANG}/messages.php`) in addition to PO paths; the translation mode is derived automatically from the file extension
+- Cleanup (`-c`) reports "not supported for PHP-array translations" and skips for PHP-array projects; Gettext cleanup behavior is unchanged
+- Section header and report labels updated from "PO Intelligence" to "Translation Intelligence" to reflect support for both formats
+
 ## [v1.05.01] - 2026-02-26
 
 | Type    | Count |
