@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.07.00] - 2026-06-02
+
+| Category | Description                                                                     |
+|----------|---------------------------------------------------------------------------------|
+| Added    | Animated progress spinner for all active sections                               |
+| Added    | Twig and SQL files are now scanned for translation key usage                    |
+| Changed  | PHP-FPM restart auto-detects the running version instead of using a fixed name  |
+
+### Added
+- Animated braille spinner shows live progress during long-running operations (translation scan, PO compile, FPM restart, ownership, permissions, hostname apply); each section displays a phase label while work is in progress
+- Spinner output goes to stderr only — the analysis report and any file output (`-f`) are unaffected
+- Degrades gracefully when stderr is not a TTY (CI, pipes, redirected output): prints a single plain-text label per phase, no ANSI escape codes
+- Cursor is automatically restored on exit, interrupt (Ctrl-C), and termination signals — no stray background processes or hidden cursors left behind
+- Translation key usage is now detected in Twig template files (`.twig`) — keys found in templates are treated as used, same as PHP and JS
+- Translation key usage is now detected in SQL files (`.sql`) — keys stored as values in schema or migration files are treated as used and not flagged as orphaned
+
+### Changed
+- PHP-FPM restart (`-r`) auto-detects the active service name instead of using the hardcoded `php8.4-fpm`; selects the highest-versioned running instance, with fallback to active and then installed units
+
 ## [v1.06.00] - 2026-06-02
 
 | Category | Description                                                              |

@@ -53,8 +53,8 @@ CodeWarden -u -p "webroot/locale/{LANG}/messages.php"
 | Sub-option   | Default | Description                                                            |
 |--------------|---------|------------------------------------------------------------------------|
 | `sync`       | yes     | Keys missing in one language file but present in the other             |
-| `missing`    | yes     | Full keys found in code (PHP/JS) but not defined in translation files  |
-| `unused`     | yes     | Keys defined in translation files but not used in code (PHP/JS)        |
+| `missing`    | yes     | Full keys found in code (PHP/JS/Twig/SQL) but not defined in translation files  |
+| `unused`     | yes     | Keys defined in translation files but not used in code (PHP/JS/Twig/SQL)        |
 | `duplicates` | yes     | Duplicate key entries within translation files                         |
 | `dynamic`    | yes     | Dynamic prefixes (keys ending with `_`) used for concatenation in code |
 | `doconly`    | no      | Keys found only in documentation files — must be explicitly specified  |
@@ -112,7 +112,7 @@ CodeWarden -n flowershop.local
 
 ## Translation Intelligence: Key Classification
 
-| In Code (PHP/JS) | Dynamic Prefix | In translations | Classification             |
+| In Code (PHP/JS/Twig/SQL) | Dynamic Prefix | In translations | Classification             |
 |------------------|----------------|-----------------|----------------------------|
 | Yes              | -              | Yes             | ✓ OK (used correctly)      |
 | Yes              | -              | No              | Missing from translations  |

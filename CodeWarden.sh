@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="v1.06.00"
+VERSION="v1.07.00"
 
 # Record start time for performance tracking
 START_TIME=$(date +%s)
@@ -47,6 +47,48 @@ key_line() {
     [[ -n "$line" ]] && echo "$line" || echo "N/A"
 }
 
+# Spinner state for animated progress feedback
+SPINNER_PID=""
+SPINNER_FRAMES=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+
+# Start an animated spinner on stderr with a label.
+# Degrades to a plain label line when stderr is not a TTY.
+start_spinner() {
+    local label="${1:-Working…}"
+    if [[ -t 2 ]]; then
+        printf '\033[?25l' >&2
+        (
+            local i=0
+            while true; do
+                printf '\r%s %s ' "${SPINNER_FRAMES[i++ % ${#SPINNER_FRAMES[@]}]}" "$label" >&2
+                sleep 0.1
+            done
+        ) &
+        SPINNER_PID=$!
+    else
+        printf '%s\n' "$label" >&2
+        SPINNER_PID=""
+    fi
+}
+
+# Stop the spinner, clear its line, and optionally print a completion note to stderr.
+stop_spinner() {
+    local final="${1:-}"
+    if [[ -n "$SPINNER_PID" ]]; then
+        kill "$SPINNER_PID" 2>/dev/null
+        wait "$SPINNER_PID" 2>/dev/null
+        SPINNER_PID=""
+    fi
+    if [[ -t 2 ]]; then
+        printf '\r\033[K' >&2
+        printf '\033[?25h' >&2
+    fi
+    [[ -n "$final" ]] && printf '%s\n' "$final" >&2
+}
+
+# Ensure spinner is cleaned up on exit, interrupt, or termination.
+trap 'stop_spinner' EXIT INT TERM
+
 # Sub-section toggles
 RUN_SYNC=false
 RUN_MISSING=false
@@ -82,7 +124,7 @@ usage() {
     echo "  -v, --version            Display version information"
     echo ""
     echo "Translation Intelligence & Localization:"
-    echo "  -r, --restart            Compile PO files and restart PHP-8.4 FPM"
+    echo "  -r, --restart            Compile PO files and restart PHP-FPM (auto-detects running version)"
     echo "  -p, --po-path <path>     Override translation file path template (auto-detected by default)"
     echo "                           Default probes: locale/{LANG}/messages.php, webroot/locale/{LANG}/messages.php,"
     echo "                           then locale/{LANG}/LC_MESSAGES/messages.po (PHP preferred over Gettext)"
@@ -104,6 +146,21 @@ require_arg() {
         echo "Error: Option $1 requires an argument."
         exit 1
     fi
+}
+
+# Detect the active PHP-FPM systemd service name (e.g. php8.4-fpm).
+# Prefers the highest-versioned running service; falls back to active, then any installed unit.
+detect_fpm_service() {
+    local svc
+    for state in running active; do
+        svc=$(systemctl list-units --type=service --state="$state" --no-legend 2>/dev/null \
+            | grep -oP 'php[0-9.]*-fpm' | sort -V | tail -1)
+        [[ -n "$svc" ]] && echo "$svc" && return 0
+    done
+    svc=$(systemctl list-unit-files --type=service --no-legend 2>/dev/null \
+        | grep -oP 'php[0-9.]*-fpm' | sort -V | tail -1)
+    [[ -n "$svc" ]] && echo "$svc" && return 0
+    return 1
 }
 
 # Check if no arguments provided
@@ -165,6 +222,7 @@ echo "Base Path: $BASE_PATH"
 # 1. PO Compilation & FPM Restart
 if [ "$DO_RESTART" = true ]; then
     echo "--- SECTION: PO COMPILATION & FPM RESTART ---"
+    start_spinner "Compiling translations…"
     COMPILE_SUCCESS=true
     for LANG_CODE in "${LANG_CODES[@]}"; do
         FINAL_PO_PATH=$(echo "$PO_RELATIVE_PATH" | sed "s/{LANG}/$LANG_CODE/g")
@@ -186,18 +244,25 @@ if [ "$DO_RESTART" = true ]; then
 
     # FPM Restart
     FPM_SUCCESS=true
-    echo "Step: Restarting php8.4-fpm..."
-    if [ "$DRY_RUN" = false ]; then
-        if ! sudo systemctl restart php8.4-fpm; then
-            echo "Details: Last few lines of the error log:"
-            sudo journalctl -u php8.4-fpm -n 5 --no-pager
-            FPM_SUCCESS=false
-        fi
+    FPM_SERVICE=$(detect_fpm_service)
+    if [[ -z "$FPM_SERVICE" ]]; then
+        echo "Error: No PHP-FPM service found via systemctl."
+        FPM_SUCCESS=false
     else
-        echo "[DRY-RUN] Would restart php8.4-fpm"
+        echo "Step: Restarting $FPM_SERVICE..."
+        if [ "$DRY_RUN" = false ]; then
+            if ! sudo systemctl restart "$FPM_SERVICE"; then
+                echo "Details: Last few lines of the error log:"
+                sudo journalctl -u "$FPM_SERVICE" -n 5 --no-pager
+                FPM_SUCCESS=false
+            fi
+        else
+            echo "[DRY-RUN] Would restart $FPM_SERVICE"
+        fi
     fi
 
     # Section status
+    stop_spinner
     if [ "$COMPILE_SUCCESS" = true ] && [ "$FPM_SUCCESS" = true ]; then
         echo "Status: [SUCCESS] PO compilation & FPM restart completed."
     else
@@ -279,13 +344,14 @@ if [ "$DO_UNUSED" = true ]; then
 
         # Only run grep if we have prefixes to search for
         if [[ -n "$JOINED_PREFIXES" ]]; then
+            start_spinner "Scanning codebase for translation keys…"
             REGEX="(?<![A-Z0-9_])($JOINED_PREFIXES)[A-Z0-9_]*(?![A-Z0-9_])"
             while IFS=: read -r file match; do
                 [ -z "$match" ] && continue
                 # Skip files in root-level /storage directory (but not **/storage)
                 [[ "$file" == "$BASE_PATH/storage/"* ]] && continue
                 ext="${file##*.}"
-                is_code=$( [[ "$ext" == "php" || "$ext" == "js" ]] && echo "true" || echo "false" )
+                is_code=$( [[ "$ext" == "php" || "$ext" == "js" || "$ext" == "twig" || "$ext" == "sql" ]] && echo "true" || echo "false" )
                 is_dynamic=$( [[ "$match" =~ _$ ]] && echo "true" || echo "false" )
 
                 if [[ "$is_code" == "true" ]]; then
@@ -329,6 +395,7 @@ if [ "$DO_UNUSED" = true ]; then
                     unset "DYNAMIC_IN_CODE[$prefix]"
                 fi
             done
+            stop_spinner
         else
             echo "Warning: No translation keys found in language files."
         fi
@@ -428,7 +495,7 @@ if [ "$DO_UNUSED" = true ]; then
                     UNUSED_LIST+=("$k"); ((U_COUNT++))
                 fi
             done
-            REPORT_CONTENT+="\nSub-Section: Unused in Code (Keys defined but not used in PHP/JS)\n"
+            REPORT_CONTENT+="\nSub-Section: Unused in Code (Keys defined but not used in PHP/JS/Twig/SQL)\n"
             REPORT_CONTENT+="$(echo -e "$UNUSED_LINES" | sort -n)\n"
         fi
 
@@ -481,9 +548,12 @@ fi
 if [ "$DO_OWNER" = true ]; then
     echo "--- SECTION: OWNERSHIP ---"
     if [ "$DRY_RUN" = false ]; then
+        start_spinner "Setting ownership to $OWNER_CONFIG…"
         if sudo chown -R "$OWNER_CONFIG" "$BASE_PATH"; then
+            stop_spinner
             echo "Status: [SUCCESS] Ownership set to $OWNER_CONFIG."
         else
+            stop_spinner
             echo "Status: [FAILED] Could not set ownership."
         fi
     else
@@ -494,9 +564,11 @@ if [ "$DO_PERMISSION" = true ]; then
     echo "--- SECTION: PERMISSIONS ---"
     PERM_SUCCESS=true
     if [ "$DRY_RUN" = false ]; then
+        start_spinner "Applying permissions…"
         sudo find "$BASE_PATH" -type d -exec chmod 775 {} \; || PERM_SUCCESS=false
         sudo find "$BASE_PATH" -type f ! -name "*.sh" -exec chmod 664 {} \; || PERM_SUCCESS=false
         sudo find "$BASE_PATH" -type f -name "*.sh" -exec chmod 775 {} \; || PERM_SUCCESS=false
+        stop_spinner
         if [ "$PERM_SUCCESS" = true ]; then
             echo "Status: [SUCCESS] Permissions applied (dirs: 775, files: 664, scripts: 775)."
         else
@@ -519,9 +591,12 @@ if [ "$DO_HOSTNAME" = true ]; then
         echo "[DRY-RUN] Would run: sudo hostnamectl set-hostname \"$HOSTNAME_VALUE\""
         echo "[DRY-RUN] Would run: sudo systemctl restart avahi-daemon"
     else
+        start_spinner "Setting hostname to '$HOSTNAME_VALUE'…"
         if sudo hostnamectl set-hostname "$HOSTNAME_VALUE" && sudo systemctl restart avahi-daemon; then
+            stop_spinner
             echo "Status: [SUCCESS] Hostname set to '$HOSTNAME_VALUE' and avahi-daemon restarted."
         else
+            stop_spinner
             echo "Status: [FAILED] Could not set hostname or restart avahi-daemon."
         fi
     fi
