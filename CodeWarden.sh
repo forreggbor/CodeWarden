@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="v1.07.00"
+VERSION="v1.08.01"
 
 # Record start time for performance tracking
 START_TIME=$(date +%s)
@@ -10,6 +10,7 @@ DO_RESTART=false
 DO_OWNER=false
 DO_PERMISSION=false
 DO_UNUSED=false
+DO_LIB_LOCALES=false
 DO_FILE=false
 DO_CLEANUP=false
 DO_HOSTNAME=false
@@ -105,13 +106,19 @@ OUTPUT_FILE="po_intelligence_report_$(date +%Y-%m-%d).txt"
 
 # Filters for analysis
 DOC_EXTENSIONS=" md txt log sql bak json local "
-EXCLUDE_DIRS=(vendor .claude database locale .idea .git)
+EXCLUDE_DIRS=(vendor .claude database locale .idea .git storage doc)
 EXCLUDE_FILES=("composer.*" ".git*")
 
 # Translation file path templates (probed in order; first match per language wins)
 PHP_PATH_TEMPLATES=( "locale/{LANG}/messages.php" "webroot/locale/{LANG}/messages.php" )
 PO_PATH_TEMPLATES=( "locale/{LANG}/LC_MESSAGES/messages.po" "webroot/locale/{LANG}/LC_MESSAGES/messages.po" )
 LANG_CODES=("en_US" "hu_HU")
+
+# Glob template for reusable-module translation files (see -L/--lib-locales).
+# Modules under lib/<module>/ always ship PHP-array locale files per the
+# Reusables convention; used only to widen the "is this key defined anywhere"
+# check, never merged into the HU/EN sync comparison of the app's own files.
+LIB_PHP_GLOB_TEMPLATE="lib/*/locale/{LANG}/messages.php"
 
 # Display complete usage instructions
 usage() {
@@ -129,6 +136,9 @@ usage() {
     echo "                           Default probes: locale/{LANG}/messages.php, webroot/locale/{LANG}/messages.php,"
     echo "                           then locale/{LANG}/LC_MESSAGES/messages.po (PHP preferred over Gettext)"
     echo "  -u, --unused [sub...]    Analyze translations: sync, missing, unused, duplicates, dynamic, doconly"
+    echo "  -L, --lib-locales        Also load lib/*/locale/{LANG}/messages.php as valid key definitions"
+    echo "                           (PHP-array mode only; use with -u to fix false 'missing' hits from"
+    echo "                           vendored Reusables modules). Never affects the HU/EN sync check."
     echo "  -c, --cleanup            Comment out strictly unused keys (Gettext only; PHP-array is report-only)"
     echo "  -f, --file               Save analysis report to file"
     echo ""
@@ -188,6 +198,7 @@ while [[ $# -gt 0 ]]; do
             fi
             DO_HOSTNAME=true; HOSTNAME_VALUE="$2"; shift 2 ;;
         -y|--yes)           AUTO_CONFIRM=true; shift ;;
+        -L|--lib-locales)   DO_LIB_LOCALES=true; shift ;;
         -c|--cleanup)       DO_CLEANUP=true; shift ;;
         -f|--file)          DO_FILE=true; shift ;;
         --dry-run)          DRY_RUN=true; shift ;;
@@ -336,6 +347,36 @@ if [ "$DO_UNUSED" = true ]; then
             while read -r k; do [ -n "$k" ] && PO_EN["$k"]=1 && PO_ALL["$k"]=1; done <<< "$(extract_keys "$TRANS_MODE" "$FULL_EN")"
         fi
 
+        # -L/--lib-locales: also treat lib/<module>/locale/{LANG}/messages.php keys as
+        # defined. Merged into PO_ALL only (definedness for Missing/Unused/Dynamic) —
+        # deliberately NOT into PO_HU/PO_EN, so the Sync Check keeps meaning "app-root
+        # HU vs EN parity" and doesn't conflate it with a vendored module's own pairing.
+        declare -A PO_LIB; declare -A KEY_LIB_SOURCE
+        if [[ "$DO_LIB_LOCALES" == true ]]; then
+            if [[ "$TRANS_MODE" != "php" ]]; then
+                echo "Warning: -L/--lib-locales only supports PHP-array translations; ignoring (Gettext project)."
+            else
+                shopt -s nullglob
+                LIB_FILE_COUNT=0
+                for lang in "${LANG_CODES[@]}"; do
+                    lib_glob="$BASE_PATH/$(echo "$LIB_PHP_GLOB_TEMPLATE" | sed "s/{LANG}/$lang/g")"
+                    for lib_file in $lib_glob; do
+                        [[ -f "$lib_file" ]] || continue
+                        ((LIB_FILE_COUNT++))
+                        module_name=$(basename "$(dirname "$(dirname "$(dirname "$lib_file")")")")
+                        while read -r k; do
+                            [ -z "$k" ] && continue
+                            PO_LIB["$k"]=1
+                            PO_ALL["$k"]=1
+                            [[ -z "${KEY_LIB_SOURCE[$k]}" ]] && KEY_LIB_SOURCE["$k"]="$module_name"
+                        done <<< "$(extract_keys "php" "$lib_file")"
+                    done
+                done
+                shopt -u nullglob
+                echo "Lib locales: $LIB_FILE_COUNT file(s) under lib/*/locale/, ${#PO_LIB[@]} additional key(s)"
+            fi
+        fi
+
         PREFIXES=$(for k in "${!PO_ALL[@]}"; do echo "$k"; done | grep -o '^[^_]\+_' | sort -u)
         JOINED_PREFIXES=$(echo "$PREFIXES" | tr '\n' '|' | sed 's/|$//')
 
@@ -345,11 +386,21 @@ if [ "$DO_UNUSED" = true ]; then
         # Only run grep if we have prefixes to search for
         if [[ -n "$JOINED_PREFIXES" ]]; then
             start_spinner "Scanning codebase for translation keys…"
-            REGEX="(?<![A-Z0-9_])($JOINED_PREFIXES)[A-Z0-9_]*(?![A-Z0-9_])"
+            # -I (skip binary files) is load-bearing, not cosmetic: a translation key can
+            # never live inside a binary file, but without -I, grep still reads every byte
+            # of one looking for a match before giving up. storage/ and doc/ (excluded
+            # above) are the usual offenders, but a binary file can turn up anywhere in a
+            # project (uploaded assets, generated PDFs, vendored fonts); -I keeps a scan
+            # from stalling on any of them, with no risk of a missed key.
+            # Require the token to be a whole quoted-string literal (immediately after
+            # ' or " and immediately before the matching close quote). This is what every
+            # real key reference looks like (__('TEXT_X'), 'TEXT_X' => ..., t('TEXT_X')) and
+            # it rules out bare-identifier false positives that the old identifier-boundary
+            # check let through: PHPDoc example text ("e.g. TEXT_X") and JS/PHP constant
+            # access (Node.TEXT_NODE, MyClass::TEXT_X are never inside quotes).
+            REGEX="(?<=['\"])($JOINED_PREFIXES)[A-Z0-9_]*(?=['\"])"
             while IFS=: read -r file match; do
                 [ -z "$match" ] && continue
-                # Skip files in root-level /storage directory (but not **/storage)
-                [[ "$file" == "$BASE_PATH/storage/"* ]] && continue
                 ext="${file##*.}"
                 is_code=$( [[ "$ext" == "php" || "$ext" == "js" || "$ext" == "twig" || "$ext" == "sql" ]] && echo "true" || echo "false" )
                 is_dynamic=$( [[ "$match" =~ _$ ]] && echo "true" || echo "false" )
@@ -366,7 +417,7 @@ if [ "$DO_UNUSED" = true ]; then
                         [[ -z "${KEY_IN_DOCS[$match]}" ]] && KEY_IN_DOCS["$match"]="$ext"
                     fi
                 fi
-            done <<< "$(grep -rPo "${GREP_EXCLUDES[@]}" "$REGEX" "$BASE_PATH" 2>/dev/null)"
+            done <<< "$(grep -rIPo "${GREP_EXCLUDES[@]}" "$REGEX" "$BASE_PATH" 2>/dev/null)"
 
             # Post-process: Remove keys from KEY_IN_DOCS if they're also in KEY_IN_CODE
             # (handles case where doc file was processed before code file)
@@ -395,6 +446,36 @@ if [ "$DO_UNUSED" = true ]; then
                     unset "DYNAMIC_IN_CODE[$prefix]"
                 fi
             done
+
+            # Infix dynamic concatenation: 'PREFIX' . $var . 'SUFFIX' patterns (e.g.
+            # $t('TEXT_RESTORE_GUIDE_STEP' . $n . '_TITLE')) are invisible to the single-
+            # token REGEX above — it only captures the literal 'PREFIX' segment, which then
+            # looks like a static, missing key even though the real (suffixed) keys exist.
+            # ONE extra full-tree grep pass (same cost class as the main scan above, run
+            # once — NOT once per candidate key, which is what made an earlier version of
+            # this check take 40+ minutes on a real project instead of seconds) finds every
+            # such expression; reclassify the ones whose suffixed keys really exist as
+            # dynamically used instead of reporting them as Missing.
+            declare -A DYNAMIC_INFIX_MATCHED
+            INFIX_REGEX="'($JOINED_PREFIXES)[A-Z0-9_]*'\s*\.\s*\\\$[A-Za-z_][A-Za-z0-9_]*\s*\.\s*'[A-Z0-9_]*'"
+            while IFS=: read -r infix_file infix_match; do
+                [[ -z "$infix_match" ]] && continue
+                prefix_key=$(printf '%s' "$infix_match" | grep -oP "^'\K[A-Z0-9_]+(?=')")
+                suffix=$(printf '%s' "$infix_match" | grep -oP "'\K[A-Z0-9_]*(?='\$)")
+                [[ -z "$prefix_key" || -n "${PO_ALL[$prefix_key]}" ]] && continue
+                orig_ext="${KEY_IN_CODE[$prefix_key]:-php}"
+                match_count=0
+                for po_key in "${!PO_ALL[@]}"; do
+                    if [[ "$po_key" == "$prefix_key"* && "$po_key" == *"$suffix" ]]; then
+                        ((match_count++))
+                        DYNAMICALLY_USED_KEYS["$po_key"]="${prefix_key}…${suffix}"
+                    fi
+                done
+                if (( match_count > 0 )); then
+                    DYNAMIC_INFIX_MATCHED["${prefix_key}…${suffix}"]="$orig_ext"
+                    unset "KEY_IN_CODE[$prefix_key]"
+                fi
+            done <<< "$(grep -rIPo "${GREP_EXCLUDES[@]}" "$INFIX_REGEX" "$BASE_PATH" 2>/dev/null)"
             stop_spinner
         else
             echo "Warning: No translation keys found in language files."
@@ -404,6 +485,7 @@ if [ "$DO_UNUSED" = true ]; then
         for k in "${!PO_ALL[@]}"; do (( ${#k} > MAX_LEN )) && MAX_LEN=${#k}; done
         for k in "${!KEY_IN_CODE[@]}"; do (( ${#k} > MAX_LEN )) && MAX_LEN=${#k}; done
         for k in "${!DYNAMIC_IN_CODE[@]}"; do (( ${#k} > MAX_LEN )) && MAX_LEN=${#k}; done
+        for k in "${!DYNAMIC_INFIX_MATCHED[@]}"; do (( ${#k} > MAX_LEN )) && MAX_LEN=${#k}; done
         for k in "${!KEY_IN_DOCS[@]}"; do (( ${#k} > MAX_LEN )) && MAX_LEN=${#k}; done
 
         REPORT_CONTENT=""
@@ -411,9 +493,22 @@ if [ "$DO_UNUSED" = true ]; then
 
         if [ "$RUN_DUPLICATES" = true ]; then
             REPORT_CONTENT+="\nSub-Section: Duplicate Definitions\n"
-            for f in "$FULL_HU" "$FULL_EN"; do
+            DUP_FILES=("$FULL_HU" "$FULL_EN")
+            if [[ "$DO_LIB_LOCALES" == true && "$TRANS_MODE" == "php" ]]; then
+                shopt -s nullglob
+                for lang in "${LANG_CODES[@]}"; do
+                    lib_glob="$BASE_PATH/$(echo "$LIB_PHP_GLOB_TEMPLATE" | sed "s/{LANG}/$lang/g")"
+                    for lib_file in $lib_glob; do DUP_FILES+=("$lib_file"); done
+                done
+                shopt -u nullglob
+            fi
+            for f in "${DUP_FILES[@]}"; do
                 [[ -z "$f" || ! -f "$f" ]] && continue
-                fname=$(basename "$f")
+                if [[ "$f" == "$BASE_PATH/lib/"* ]]; then
+                    fname="lib/$(basename "$(dirname "$(dirname "$(dirname "$f")")")")/$(basename "$f")"
+                else
+                    fname=$(basename "$f")
+                fi
                 if [[ "$TRANS_MODE" == "php" ]]; then
                     DUPS=""
                     dup_keys=$(grep -oP "^\s*'\K[A-Z0-9_]+(?='\s*=>)" "$f" | sort | uniq -d)
@@ -457,6 +552,18 @@ if [ "$DO_UNUSED" = true ]; then
                 REPORT_CONTENT+=$(printf "  Dynamic | %-12s | %-${MAX_LEN}s | %d keys protected\n" "(${DYNAMIC_IN_CODE[$k]})" "$k" "$match_count")
                 REPORT_CONTENT+="\n"
             done
+            mapfile -t sorted_infix_keys < <(printf "%s\n" "${!DYNAMIC_INFIX_MATCHED[@]}" | sort)
+            for k in "${sorted_infix_keys[@]}"; do
+                [ -z "$k" ] && continue
+                ((DYN_COUNT++))
+                prefix="${k%…*}"; suffix="${k#*…}"
+                match_count=0
+                for po_key in "${!PO_ALL[@]}"; do
+                    [[ "$po_key" == "$prefix"* && "$po_key" == *"$suffix" ]] && ((match_count++))
+                done
+                REPORT_CONTENT+=$(printf "  Dynamic | %-12s | %-${MAX_LEN}s | %d keys protected (infix)\n" "(${DYNAMIC_INFIX_MATCHED[$k]})" "$k" "$match_count")
+                REPORT_CONTENT+="\n"
+            done
             REPORT_CONTENT+="\n"
         fi
 
@@ -478,6 +585,11 @@ if [ "$DO_UNUSED" = true ]; then
         if [ "$RUN_UNUSED" = true ]; then
             UNUSED_LINES=""; UNUSED_LIST=()
             for k in "${!PO_ALL[@]}"; do
+                # A lib/-sourced key (see -L/--lib-locales) is never reported unused here:
+                # "not called by this project" isn't "dead code" for a vendored, shared
+                # module — another project using the same module may call it. That claim
+                # is only meaningful at the Reusables source, not on a per-project copy.
+                [[ -n "${KEY_LIB_SOURCE[$k]}" ]] && continue
                 # A key is unused if it's NOT in KEY_IN_CODE and NOT dynamically used via prefix
                 if [[ -z "${KEY_IN_CODE[$k]}" && -z "${DYNAMICALLY_USED_KEYS[$k]}" ]]; then
                     langs=""; line_num="N/A"

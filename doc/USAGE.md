@@ -23,6 +23,7 @@ CodeWarden [OPTIONS]
 | `-r, --restart`         | Compile PO files and restart PHP-FPM                                                                         |
 | `-p, --po-path <path>`  | Override translation file path template (auto-detected by default)                                           |
 | `-u, --unused [sub...]` | Analyze translations. Default: `sync`, `missing`, `unused`, `duplicates`, `dynamic`. Optional: `doconly`     |
+| `-L, --lib-locales`     | Also treat `lib/*/locale/{LANG}/messages.php` keys as defined (PHP-array mode only)                          |
 | `-c, --cleanup`         | Comment out strictly unused keys (Gettext only; PHP-array translations are report-only)                      |
 | `-f, --file`            | Save analysis report to file                                                                                  |
 
@@ -47,6 +48,23 @@ the file extension (`.php` → PHP-array, `.po` → Gettext):
 ```bash
 CodeWarden -u -p "webroot/locale/{LANG}/messages.php"
 ```
+
+### Reusable-module locale files (`-L`/`--lib-locales`)
+
+Projects that vendor shared modules under `lib/<module>/` (each with its own
+`locale/{LANG}/messages.php`, per the Reusables convention) keep those translation keys
+out of the project's own `locale/` file. Without `-L`, every such key looks "missing"
+even though it's genuinely defined — just not where CodeWarden was looking.
+
+`-L` adds `lib/*/locale/{LANG}/messages.php` as a second source of "this key is defined"
+for the **Missing**, **Dynamic Matches** and **Duplicate Definitions** checks. It does
+**not** affect the **Sync Check** (that stays "does the project's own `hu_HU` match its
+own `en_US`") and it does **not** make lib-sourced keys eligible for the **Unused**
+check — "not called from this project" doesn't mean "dead code" for a module that other
+projects may also depend on; that question only makes sense at the module's own source
+repository, not on a per-project vendored copy.
+
+PHP-array projects only (Gettext projects print a warning and ignore `-L`).
 
 ### Sub-options for `-u`
 
@@ -87,6 +105,11 @@ CodeWarden -u dynamic missing
 Check keys used only in documentation:
 ```bash
 CodeWarden -u doconly
+```
+
+Analyze translations including reusable modules under `lib/`:
+```bash
+CodeWarden -d /var/www/myproject -u -L
 ```
 
 Compile PO files and restart PHP-FPM:
@@ -141,13 +164,22 @@ not dynamic usage (e.g., if every key starts with `TEXT_`, that prefix is ignore
 
 ## Configuration
 
-Default excluded directories: `vendor`, `.claude`, `database`, `locale`, `.idea`, `.git`
+Default excluded directories: `vendor`, `.claude`, `database`, `locale`, `.idea`, `.git`,
+`storage`, `doc`
 
 Default excluded files: `composer.*`, `.git*`
 
-Root-level `/storage` directory is excluded from scanning; nested `**/storage` paths are not.
+These match by directory name at any depth, same as `locale` below — a project is not
+expected to keep scannable code inside a `storage/`, `doc/`, `vendor/`, or `database/`
+directory, wherever it appears in the tree.
 
 The `locale` directory exclusion applies both to standard (`locale/`) and non-standard
 (`webroot/locale/`) layouts — translation files are never scanned as code.
+
+Binary files (PDFs, archives, images — anything with a NUL byte early in its content) are
+never scanned for key usage, at any path (`grep -I`), on top of the directory exclusions
+above. A translation key can't live inside one anyway, and this keeps a scan from
+stalling on binary content that turns up somewhere the directory exclusions don't cover
+(uploaded assets, generated PDFs, vendored fonts).
 
 Supported languages: `en_US`, `hu_HU`

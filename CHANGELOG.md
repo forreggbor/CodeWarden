@@ -2,6 +2,53 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.08.01] - 2026-09-18
+
+| Category | Description                                                          |
+|----------|-----------------------------------------------------------------------|
+| Changed  | `storage` and `doc` are now excluded from scans by default, like `vendor`/`database` |
+
+### Changed
+- `storage` and `doc` directories are now excluded from scans by default, at any depth —
+  the same "excluded by name, anywhere in the tree" rule already applied to `vendor`,
+  `database`, and `locale`. A project isn't expected to keep scannable code inside either,
+  and they're exactly where large binary content (backups, generated PDFs, reference
+  material) tends to accumulate. Replaces the previous root-level-only `storage/`
+  post-filter, which excluded matches from the report but still had to read every
+  scanned byte to find them.
+
+## [v1.08.00] - 2026-09-18
+
+| Category | Description                                                                     |
+|----------|-----------------------------------------------------------------------------------|
+| Added    | `-L`/`--lib-locales` treats `lib/*/locale/{LANG}/messages.php` keys as defined    |
+| Fixed    | Missing-key detection no longer flags non-translation string literals             |
+| Fixed    | Missing-key detection now recognizes `'PREFIX' . $var . 'SUFFIX'` concatenation   |
+| Fixed    | Scans no longer stall for minutes on projects with large binary content           |
+
+### Added
+- New `-L`/`--lib-locales` flag: also loads `lib/*/locale/{LANG}/messages.php` (the
+  Reusables vendored-module convention) as a valid source of key definitions for the
+  Missing, Dynamic Matches, and Duplicate Definitions checks. Deliberately excluded from
+  the Sync Check (stays scoped to the project's own HU/EN pair) and from the Unused check
+  (a key unused by this project may still be used by another project sharing the same
+  module — only that module's own source repository can answer "is this dead code").
+  PHP-array projects only; a Gettext project prints a warning and ignores the flag.
+
+### Fixed
+- Key detection now requires the matched token to be a whole quoted-string literal, not
+  just any `TEXT_`-shaped run of characters anywhere in a file. This removes false
+  "missing" reports for things that were never a translation call in the first place:
+  PHPDoc example text, JS/PHP constant access (`Node.TEXT_NODE`, `MyClass::TEXT_X`).
+- `'PREFIX' . $var . 'SUFFIX'` string concatenation (a variable spliced into the middle
+  of two literal halves) is now recognized as dynamic key construction, the same way
+  `'PREFIX_' . $var` already was. Previously the literal `PREFIX` half was reported as a
+  static, missing key even when the real (suffixed) keys existed.
+- Recursive scans no longer read the full content of binary files (backups, PDFs,
+  images, archives) looking for key matches. A project that keeps several gigabytes of
+  such content under a scanned path could previously turn a sub-second scan into one
+  that took many minutes, or appeared to hang.
+
 ## [v1.07.00] - 2026-06-02
 
 | Category | Description                                                                     |
